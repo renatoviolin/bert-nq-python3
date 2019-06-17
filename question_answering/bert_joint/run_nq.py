@@ -223,13 +223,22 @@ def has_long_answer(a):
 
 
 def should_skip_context(e, idx):
+    # print('ENTROU NO SHOULD')
+    # print(idx)
+    # print(get_candidate_text(e, idx).text.strip())
+    # input()
     if (FLAGS.skip_nested_contexts and
             not e["long_answer_candidates"][idx]["top_level"]):
+        # print('ENTROU NO FLAGS')
         return True
     elif not get_candidate_text(e, idx).text.strip():
+        # print('===== STRIP===========')
+        # print(get_candidate_text(e, idx).text.strip())
         # Skip empty contexts.
+        # print('ENTROU NO CANDIDATES')
         return True
     else:
+        # print('ENTROU NO ELSE')
         return False
 
 
@@ -357,6 +366,10 @@ def get_candidate_text(e, idx):
 def candidates_iter(e):
     """Yield's the candidates that should not be skipped in an example."""
     for idx, c in enumerate(e["long_answer_candidates"]):
+        # print('===== CANDIDATES ITER ===== ')
+        # print(idx)
+        # print(c)
+        # input()
         if should_skip_context(e, idx):
             continue
         yield idx, c
@@ -367,12 +380,119 @@ def create_example_from_jsonl(line):
     e = json.loads(line, object_pairs_hook=collections.OrderedDict)
     add_candidate_types_and_positions(e)
     annotation, annotated_idx, annotated_sa = get_first_annotation(e)
+    # print('ANOTATION')
+    # print(annotation)
+    # annotated_idx: index of the first annotated context, -1 if null.
+    # annotated_sa: short answer start and end char offsets, (-1, -1) if null.
+    question = {"input_text": e["question_text"]}
+    answer = {
+        "candidate_id": annotated_idx,
+        "span_text": "",
+        "span_start": -1,
+        "span_end": -1,
+        "input_text": "long",
+    }
+
+    # Yes/no answers are added in the input text.
+    if annotation is not None:
+        assert annotation["yes_no_answer"] in ("YES", "NO", "NONE")
+        if annotation["yes_no_answer"] in ("YES", "NO"):
+            answer["input_text"] = annotation["yes_no_answer"].lower()
+
+    # Add a short answer if one was found.
+    if annotated_sa != (-1, -1):
+        answer["input_text"] = "short"
+        span_text = get_candidate_text(e, annotated_idx).text
+        answer["span_text"] = span_text[annotated_sa[0]:annotated_sa[1]]
+        answer["span_start"] = annotated_sa[0]
+        answer["span_end"] = annotated_sa[1]
+        expected_answer_text = get_text_span(
+            e, {
+                "start_token": annotation["short_answers"][0]["start_token"],
+                "end_token": annotation["short_answers"][-1]["end_token"],
+            }).text
+        assert expected_answer_text == answer["span_text"], (expected_answer_text,
+                                                             answer["span_text"])
+
+    # Add a long answer if one was found.
+    elif annotation and annotation["long_answer"]["candidate_index"] >= 0:
+        answer["span_text"] = get_candidate_text(e, annotated_idx).text
+        answer["span_start"] = 0
+        answer["span_end"] = len(answer["span_text"])
+
+    context_idxs = [-1]
+    context_list = [{"id": -1, "type": get_candidate_type_and_position(e, -1)}]
+    context_list[-1]["text_map"], context_list[-1]["text"] = (get_candidate_text(e, -1))
+    for idx, _ in candidates_iter(e):
+        # print(idx)
+        # print('========== CANDIDATES ===============')
+        # print(get_candidate_text(e, idx).text)
+        # input()
+        context = {"id": idx, "type": get_candidate_type_and_position(e, idx)}
+        context["text_map"], context["text"] = get_candidate_text(e, idx)
+        context_idxs.append(idx)
+        context_list.append(context)
+        if len(context_list) >= FLAGS.max_contexts:
+            break
+
+    # Assemble example.
+    example = {
+        "name": e["document_title"],
+        "id": str(e["example_id"]),
+        "questions": [question],
+        "answers": [answer],
+        "has_correct_context": annotated_idx in context_idxs
+    }
+
+    single_map = []
+    single_context = []
+    offset = 0
+    for context in context_list:
+        single_map.extend([-1, -1])
+        single_context.append("[ContextId=%d] %s" %
+                              (context["id"], context["type"]))
+        offset += len(single_context[-1]) + 1
+        if context["id"] == annotated_idx:
+            answer["span_start"] += offset
+            answer["span_end"] += offset
+
+        # Many contexts are empty once the HTML tags have been stripped, so we
+        # want to skip those.
+        if context["text"]:
+            single_map.extend(context["text_map"])
+            single_context.append(context["text"])
+            offset += len(single_context[-1]) + 1
+
+    example["contexts"] = " ".join(single_context)
+    example["contexts_map"] = single_map
+    if annotated_idx in context_idxs:
+        expected = example["contexts"][answer["span_start"]:answer["span_end"]]
+
+        # This is a sanityp check to ensure that the calculated start and end
+        # indices match the reported span text. If this assert fails, it is likely
+        # a bug in the data preparation code above.
+        assert expected == answer["span_text"], (expected, answer["span_text"])
+
+    return example
+
+
+
+def create_example_from_jsonl_predict(line):
+    """Creates an NQ example from a given line of JSON."""
+    e = json.loads(line, object_pairs_hook=collections.OrderedDict)
+    add_candidate_types_and_positions(e)
+    annotation, annotated_idx, annotated_sa = get_first_annotation(e)
+
+    # print('====CREATE EXAMPLE =======')
+    # print(e)
+    # print()
 
     # annotated_idx: index of the first annotated context, -1 if null.
     # annotated_sa: short answer start and end char offsets, (-1, -1) if null.
     question = {"input_text": e["question_text"]}
     answer = {
         "candidate_id": annotated_idx,
+        "candidate_id": "",
         "span_text": "",
         "span_start": -1,
         "span_end": -1,
@@ -427,6 +547,8 @@ def create_example_from_jsonl(line):
         "has_correct_context": annotated_idx in context_idxs
     }
 
+
+
     single_map = []
     single_context = []
     offset = 0
@@ -457,7 +579,6 @@ def create_example_from_jsonl(line):
         assert expected == answer["span_text"], (expected, answer["span_text"])
 
     return example
-
 
 def make_nq_answer(contexts, answer):
     """Makes an Answer object following NQ conventions.
@@ -896,17 +1017,17 @@ def read_nq_examples(input_file, is_training):
         else:
             return tf.gfile.Open(path, "rb")
 
-    # for path in input_paths:
-    #     tf.logging.info("Reading: %s", path)
-    #     with _open(path) as input_file:
-    #         for line in input_file:
-    #             input_data.append(create_example_from_jsonl(line))
-
     for path in input_paths:
         tf.logging.info("Reading: %s", path)
         with _open(path) as input_file:
-            for j in range(5):
-                input_data.append(create_example_from_jsonl(input_file.__next__()))
+            for line in input_file:
+                input_data.append(create_example_from_jsonl(line))
+
+    # for path in input_paths:
+    #     tf.logging.info("Reading: %s", path)
+    #     with _open(path) as input_file:
+    #         for j in range(1):
+    #             input_data.append(create_example_from_jsonl(input_file.__next__()))
 
     examples = []
     for entry in input_data:
@@ -1213,26 +1334,26 @@ class ScoreSummary(object):
         self.answer_type_logits = None
 
 
-# def read_candidates_from_one_split(input_path):
-#     """Read candidates from a single jsonl file."""
-#     candidates_dict = {}
-#     with gzip.GzipFile(fileobj=tf.gfile.Open(input_path, 'rb')) as input_file:
-#         tf.logging.info("Reading examples from: %s", input_path)
-#         for line in input_file:
-#             e = json.loads(line)
-#             print(e["example_id"])
-#             candidates_dict[e["example_id"]] = e["long_answer_candidates"]
-#     return candidates_dict
-
 def read_candidates_from_one_split(input_path):
     """Read candidates from a single jsonl file."""
     candidates_dict = {}
     with gzip.GzipFile(fileobj=tf.gfile.Open(input_path, 'rb')) as input_file:
         tf.logging.info("Reading examples from: %s", input_path)
-        for i in range(5):
-            e = json.loads(input_file.__next__())
+        for line in input_file:
+            e = json.loads(line)
+            # print(e["example_id"])
             candidates_dict[e["example_id"]] = e["long_answer_candidates"]
     return candidates_dict
+
+# def read_candidates_from_one_split(input_path):
+#     """Read candidates from a single jsonl file."""
+#     candidates_dict = {}
+#     with gzip.GzipFile(fileobj=tf.gfile.Open(input_path, 'rb')) as input_file:
+#         tf.logging.info("Reading examples from: %s", input_path)
+#         for i in range(1):
+#             e = json.loads(input_file.__next__())
+#             candidates_dict[e["example_id"]] = e["long_answer_candidates"]
+#     return candidates_dict
 
 def read_candidates(input_pattern):
     """Read candidates with real multiple processes."""
@@ -1260,6 +1381,9 @@ def compute_predictions(example, real):
     predictions = []
     n_best_size = 10
     max_answer_length = 30
+    # print('=====compute_predictions=====')
+    # print(real.questions)
+    # print()
     for unique_id, result in example.results.items():
         
         if unique_id not in example.features:
@@ -1357,14 +1481,16 @@ def compute_predictions(example, real):
 
 
 def compute_pred_dict(candidates_dict, dev_features, raw_results, eval_examples):
+    # print('=======RAW RESULTS========')
+
     """Computes official answer key from raw logits."""
-    raw_results_by_id = [(int(res["unique_id"] + 1), res)
-                         for res in raw_results]
+    raw_results_by_id = [(int(res["unique_id"] + 1), res) for res in raw_results]
+    # print(raw_results_by_id)
+
     # Cast example id to int32 for each example, similarly to the raw results.
     sess = tf.Session()
     all_candidates = candidates_dict.items()
-    example_ids = tf.to_int32(np.array([int(k) for k, _ in all_candidates
-                                        ])).eval(session=sess)
+    example_ids = tf.to_int32(np.array([int(k) for k, _ in all_candidates])).eval(session=sess)
     examples_by_id = zip(example_ids, all_candidates)
 
     # Cast unique_id also to int32 for features.
@@ -1383,14 +1509,18 @@ def compute_pred_dict(candidates_dict, dev_features, raw_results, eval_examples)
     merged = sorted(list(examples_by_id) + raw_results_by_id + list(features_by_id), key=lambda x: x[0])
     # merged = sorted(examples_by_id + raw_results_by_id)
 
+
     for idx, datum in merged:
         if isinstance(datum, tuple):
             examples.append(EvalExample(datum[0], datum[1]))
+            # print(datum[1])
+
         elif "token_map" in datum:
             examples[-1].features[idx] = datum
         else:
             examples[-1].results[idx] = datum
-    # print(examples)
+    # print('=======EXAMPLES========')
+    # print(merged)    
     
     # Construct prediction objects.
     tf.logging.info("Computing predictions...")
@@ -1399,7 +1529,7 @@ def compute_pred_dict(candidates_dict, dev_features, raw_results, eval_examples)
     # print('E: ', len(examples))
     for e_pred, e_real in zip(examples, eval_examples):
         # print('========== E =============')
-        # print(dir(e))
+        # print(e_pred)
         # input()
         summary = compute_predictions(e_pred, e_real)
         summary_dict[e_pred.example_id] = summary
@@ -1549,7 +1679,6 @@ def main(_):
         # If running eval on the TPU, you will need to specify the number of steps.
         all_results = []
         for result in estimator.predict(predict_input_fn, yield_single_examples=True):
-            # print('==========================')
             # print(result)
             # print()
             
@@ -1565,7 +1694,13 @@ def main(_):
                     start_logits=start_logits,
                     end_logits=end_logits,
                     answer_type_logits=answer_type_logits))
-
+            
+            # print('==========ALL RESULTS================')
+            # # print(len(start_logits))
+            # print(start_logits)
+            # print(end_logits)
+            # input()
+            
         candidates_dict = read_candidates(FLAGS.predict_file)
         # print(candidates_dict)
         eval_features = [
